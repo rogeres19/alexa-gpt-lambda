@@ -1,37 +1,75 @@
 export const handler = async (event) => {
-  const { request } = event;
+  const { request, session } = event;
   const intentName = request.intent?.name;
+
+  // recupera histórico da sessão
+  let history = session?.attributes?.history || [];
 
   // 1. Abertura da Skill
   if (request.type === "LaunchRequest") {
-    return buildResponse("GPT ativo. O que você quer saber?", true);
+
+    history = [
+      {
+        role: "system",
+        content: "Você é um assistente de voz da Alexa. Responda de forma curta e natural."
+      }
+    ];
+
+    return buildResponse(
+      "GPT ativo. O que você quer saber?",
+      true,
+      history
+    );
   }
 
   // 2. Fluxo da Conversa (ChatGPT)
   if (request.type === "IntentRequest" && intentName === "ChatGPTIntent") {
-    const userQuery = request.intent.slots.query.value;
 
-    // Se o usuário disser apenas uma palavra de parada, encerramos manualmente
+    const userQuery = request.intent.slots?.query?.value;
+
     const stopWords = ["parar", "cancelar", "sair", "tchau", "chega"];
 
     if (userQuery && stopWords.includes(userQuery.toLowerCase())) {
-      return buildResponse("Sessão encerrada.", false);
+      return buildResponse("Sessão encerrada.", false, []);
     }
 
     if (!userQuery) {
-      return buildResponse("Não consegui ouvir bem, pode repetir?", true);
+      return buildResponse(
+        "Não consegui ouvir bem, pode repetir?",
+        true,
+        history
+      );
     }
 
     try {
-      const gptResponse = await callChatGPT(userQuery);
 
-      // O loop: responde e já prepara o microfone para a próxima pergunta
-      return buildResponse(`${gptResponse}`, true);
+      // adiciona pergunta ao histórico
+      history.push({
+        role: "user",
+        content: userQuery
+      });
+
+      const gptResponse = await callChatGPT(history);
+
+      // adiciona resposta ao histórico
+      history.push({
+        role: "assistant",
+        content: gptResponse
+      });
+
+      // limita histórico para evitar tokens excessivos
+      history = trimHistory(history);
+
+      return buildResponse(gptResponse, true, history);
+
     } catch (error) {
+
       console.error("Erro na API:", error);
+
       return buildResponse(
         "Tive um probleminha aqui. Pode tentar de novo?",
-        true
+        true,
+        history
       );
     }
   }
@@ -41,16 +79,22 @@ export const handler = async (event) => {
     intentName === "AMAZON.StopIntent" ||
     intentName === "AMAZON.CancelIntent"
   ) {
-    return buildResponse("Até mais!", false);
+    return buildResponse("Até mais!", false, []);
   }
 
-  return buildResponse("Desculpe, não entendi.", true);
+  return buildResponse("Desculpe, não entendi.", true, history);
 };
 
-/**
- * Chamada nativa usando Fetch API (Padrão no Node.js moderno)
- */
-async function callChatGPT(prompt) {
+
+
+/*
+=============================
+Chamada GPT com histórico
+=============================
+*/
+
+async function callChatGPT(messages) {
+
   const response = await fetch(
     "https://api.openai.com/v1/chat/completions",
     {
@@ -61,18 +105,9 @@ async function callChatGPT(prompt) {
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
-        messages: [
-          {
-            role: "system",
-            content:
-              "Você é um assistente de voz. Seja conciso e direto.",
-          },
-          {
-            role: "user",
-            content: prompt,
-          },
-        ],
+        messages: messages,
         max_tokens: 200,
+        temperature: 0.7
       }),
     }
   );
@@ -85,23 +120,58 @@ async function callChatGPT(prompt) {
   );
 }
 
-/**
- * Construtor de Resposta JSON (Alexa Standard)
- */
-function buildResponse(text, keepOpen) {
+
+
+/*
+=============================
+Limita histórico
+=============================
+*/
+
+function trimHistory(history) {
+
+  const MAX_MESSAGES = 12;
+
+  if (history.length > MAX_MESSAGES) {
+
+    const system = history[0];
+
+    const recent = history.slice(-11);
+
+    return [system, ...recent];
+  }
+
+  return history;
+}
+
+
+
+/*
+=============================
+Resposta Alexa
+=============================
+*/
+
+function buildResponse(text, keepOpen, history = []) {
+
   const response = {
     version: "1.0",
+
+    sessionAttributes: {
+      history: history
+    },
+
     response: {
       outputSpeech: {
         type: "PlainText",
-        text: text,
+        text: text
       },
-      shouldEndSession: !keepOpen,
-    },
+      shouldEndSession: !keepOpen
+    }
   };
 
   if (keepOpen) {
-    // Força a Alexa a ouvir o slot "query"
+
     response.response.directives = [
       {
         type: "Dialog.ElicitSlot",
@@ -111,18 +181,18 @@ function buildResponse(text, keepOpen) {
           confirmationStatus: "NONE",
           slots: {
             query: {
-              name: "query",
-            },
-          },
-        },
-      },
+              name: "query"
+            }
+          }
+        }
+      }
     ];
 
     response.response.reprompt = {
       outputSpeech: {
         type: "PlainText",
-        text: "Ainda estou ouvindo.",
-      },
+        text: "Ainda estou ouvindo."
+      }
     };
   }
 
